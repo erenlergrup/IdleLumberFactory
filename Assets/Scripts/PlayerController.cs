@@ -4,63 +4,66 @@ using UnityEngine;
 public class PlayerController : MonoBehaviour
 {
     [Header("Movement")]
-    public float moveSpeed = 5f;            // maksimum yürüyüş hızı
-    public float accelTime = 0.12f;         // hızlanma-yavaşlama yumuşatma süresi
-    public float turnSmoothTime = 0.08f;    // yön dönme yumuşatma
-    public bool adIsDiagonalForward = true; // A ya da D tek başına basılırsa ileri-yan git
+    public float moveSpeed = 5f;                      // yürüyüş hızı (dünya hızı)
+    [Range(0.01f, 0.4f)] public float accelTime = 0.12f;
+    [Range(0.01f, 0.3f)] public float turnSmoothTime = 0.08f;
+    public bool adIsDiagonalForward = true;           // A/D tek başına -> W+A / W+D gibi ileri-yan
 
     [Header("Interact")]
     public Transform carryPoint;
     public float hitRange = 2f;
     public LayerMask treeMask;
 
+    [Header("Animation")]
+    public Animator animator;                         // karakter üstündeki Animator
+    public string speedParam = "Speed";               // Blend Tree param (0=Idle, 1=Walk)
+    public string walkMulParam = "WalkMul";           // (ops.) state Speed Multiplier param
+    public float baseAnimatorSpeed = 1.15f;           // tüm animatöre çarpan (Walk yavaşsa 1.1–1.3)
+    public Vector2 walkMulRange = new Vector2(1.0f, 1.35f); // yavaş→hızlı için multiplier aralığı
+
     // internals
     Rigidbody rb;
     Camera cam;
 
-    Vector3 inputDirXZ;   // ham (x,z) giriş
-    Vector3 velRef;       // SmoothDamp için hız ref
-    float turnVelRef;     // SmoothDampAngle için
+    Vector3 inputDirXZ;     // ham (x,z) giriş
+    Vector3 velRef;         // SmoothDamp ref
+    float turnVelRef;       // SmoothDampAngle ref
     GameObject carried;
 
-    OrbitCameraHybrid camHybrid; // Kameraya yön raporu için (ReportMoveDir)
+    OrbitCameraHybrid camHybrid;
 
     void Awake()
     {
         rb = GetComponent<Rigidbody>();
-        rb.freezeRotation = true; // X/Z dönmeleri kilitle
+        rb.freezeRotation = true; // X/Z dönmeyi kilitle, Y serbest
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
 
         cam = Camera.main;
         camHybrid = cam ? cam.GetComponent<OrbitCameraHybrid>() : null;
+
+        if (!animator) animator = GetComponentInChildren<Animator>();
+        if (animator) animator.applyRootMotion = false;      // hareketi kod sürüyor
+        if (animator) animator.speed = baseAnimatorSpeed;    // global hız çarpanı
     }
 
     void Update()
     {
-        // --- 1) Ham input oku (WASD) ---
+        // --- 1) Girdi
         float h = Input.GetAxisRaw("Horizontal"); // A(-1)  D(+1)
         float v = Input.GetAxisRaw("Vertical");   // S(-1)  W(+1)
 
-        // İstenirse A/D tek başına "ileri-yan" gibi davransın (strafe değil)
-        if (adIsDiagonalForward)
-        {
-            if (Mathf.Approximately(v, 0f) && !Mathf.Approximately(h, 0f))
-            {
-                // A: (h<0) => W+A, D: (h>0) => W+D
-                v = 1f;
-            }
-        }
+        if (adIsDiagonalForward && Mathf.Approximately(v, 0f) && !Mathf.Approximately(h, 0f))
+            v = 1f; // A/D tek basılıysa çapraz ileri varsay
 
         inputDirXZ = new Vector3(h, 0f, v);
         if (inputDirXZ.sqrMagnitude > 1f) inputDirXZ.Normalize();
 
-        // --- 2) Etkileşimler ---
+        // --- 2) Etkileşim
         if (Input.GetMouseButtonDown(0))
         {
-            Vector3 pos = transform.position + transform.forward * 1.0f;
-            var cols = Physics.OverlapSphere(pos, hitRange, treeMask);
-            foreach (var c in cols)
+            var pos = transform.position + transform.forward * 1.0f;
+            foreach (var c in Physics.OverlapSphere(pos, hitRange, treeMask))
             {
                 var t = c.GetComponentInParent<Tree>();
                 if (t != null) { t.Hit(1); break; }
@@ -73,7 +76,7 @@ public class PlayerController : MonoBehaviour
             else Drop();
         }
 
-        // --- 3) Kameraya hareket yönünü bildir (auto-align için) ---
+        // --- 3) Kameraya yön bildir (kamera auto-align için)
         if (camHybrid && cam)
         {
             Vector3 camF = cam.transform.forward; camF.y = 0f; camF.Normalize();
@@ -81,28 +84,26 @@ public class PlayerController : MonoBehaviour
             Vector3 moveDir = (camF * v + camR * h);
             if (moveDir.sqrMagnitude > 1f) moveDir.Normalize();
 
-            // "ileri" sayalım mı? Kamera ileri eksenine projeksiyon ile karar verelim
-            bool movingForward = Vector3.Dot(moveDir, camF) > 0.25f; // biraz tolerans
+            bool movingForward = Vector3.Dot(moveDir, camF) > 0.25f;
             camHybrid.ReportMoveDir(moveDir, movingForward);
         }
     }
 
     void FixedUpdate()
     {
-        // --- 4) Kamera-bazlı hedef hız ---
-        Vector3 desiredVel = GetDesiredVelocity();   // XZ hedef hız
+        // --- 4) Hedef hız (kamera düzleminde)
+        Vector3 desiredVel = GetDesiredVelocity();
         Vector3 curVel = rb.linearVelocity;
 
-        // XZ SmoothDamp, Y yerçekimine bırak
+        // XZ'yi SmoothDamp, Y'yi aynen bırak (yerçekimi)
         Vector3 newVel = new Vector3(
             Mathf.SmoothDamp(curVel.x, desiredVel.x, ref velRef.x, accelTime),
             curVel.y,
             Mathf.SmoothDamp(curVel.z, desiredVel.z, ref velRef.z, accelTime)
         );
-
         rb.linearVelocity = newVel;
 
-        // --- 5) Dönüşü hareket yönüne yumuşak hizala ---
+        // --- 5) Dönüşü hareket yönüne yumuşat
         Vector3 flatVel = new Vector3(newVel.x, 0f, newVel.z);
         if (flatVel.sqrMagnitude > 0.0001f)
         {
@@ -110,16 +111,28 @@ public class PlayerController : MonoBehaviour
             float y = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref turnVelRef, turnSmoothTime);
             rb.MoveRotation(Quaternion.Euler(0f, y, 0f));
         }
-
-        // çarpışmadan gelen açısal momenti söndür
         rb.angularVelocity = Vector3.zero;
+
+        // --- 6) Animasyon sürüşü
+        if (animator)
+        {
+            // 0..1 hız (dünya hızına göre normalize)
+            float speed01 = Mathf.Clamp01(flatVel.magnitude / Mathf.Max(0.01f, moveSpeed));
+            animator.SetFloat(speedParam, speed01);
+
+            // Walk state’te “Speed Multiplier” a bağlanacak parametre
+            if (!string.IsNullOrEmpty(walkMulParam))
+            {
+                float mul = Mathf.Lerp(walkMulRange.x, walkMulRange.y, speed01);
+                animator.SetFloat(walkMulParam, mul);
+            }
+        }
     }
 
     Vector3 GetDesiredVelocity()
     {
         if (!cam) return inputDirXZ * moveSpeed;
 
-        // Kamera düzleminde hareket
         float h = inputDirXZ.x;
         float v = inputDirXZ.z;
 
@@ -134,8 +147,7 @@ public class PlayerController : MonoBehaviour
 
     void TryPickup()
     {
-        Collider[] around = Physics.OverlapSphere(transform.position, 2f);
-        foreach (var c in around)
+        foreach (var c in Physics.OverlapSphere(transform.position, 2f))
         {
             if (c.CompareTag("Log"))
             {
@@ -169,7 +181,6 @@ public class PlayerController : MonoBehaviour
             rb2.isKinematic = false;
             rb2.AddForce(transform.forward * 2f, ForceMode.VelocityChange);
         }
-
         carried = null;
     }
 

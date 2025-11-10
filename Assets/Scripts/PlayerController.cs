@@ -5,44 +5,40 @@ public class PlayerController : MonoBehaviour
 {
     [Header("Movement")]
     public float moveSpeed = 5f;
-    public float accelTime = 0.12f;        // hız yumuşatma
-    public float turnSmoothTime = 0.08f;   // dönüş yumuşatma
+    public float accelTime = 0.12f;
+    public float turnSmoothTime = 0.08f;
 
     [Header("Interact")]
     public Transform carryPoint;
     public float hitRange = 2f;
     public LayerMask treeMask;
 
-    private Rigidbody rb;
-    private Camera cam;
+    Rigidbody rb;
+    Vector3 inputDir, velRef;
+    float turnVelRef;
 
-    // smoothing state
-    private Vector2 input;                 // Update'ta okunur
-    private float currentSpeed;
-    private float speedVel;
-    private float turnSmoothVel;
+    GameObject carried;
 
-    private GameObject carried;
-
-    void Start()
+    void Awake()
     {
         rb = GetComponent<Rigidbody>();
-        rb.constraints = RigidbodyConstraints.FreezeRotationX |
-                         RigidbodyConstraints.FreezeRotationZ;
-        cam = Camera.main;
+        rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ; // Y istersen ekle
+        rb.angularDamping = 3f;
+        rb.maxAngularVelocity = 2f;
     }
 
     void Update()
     {
-        // 1) Ham input sadece Update'ta
+        // 1) Input sadece oku
         float h = Input.GetAxisRaw("Horizontal");
         float v = Input.GetAxisRaw("Vertical");
-        input = new Vector2(h, v);
+        inputDir = new Vector3(h, 0, v).normalized;
 
-        // 2) Kes (LMB)
+        // Kes (LMB)
         if (Input.GetMouseButtonDown(0))
         {
-            Collider[] cols = Physics.OverlapSphere(transform.position + transform.forward * 1.0f, hitRange, treeMask);
+            var pos = transform.position + transform.forward * 1.0f;
+            var cols = Physics.OverlapSphere(pos, hitRange, treeMask);
             foreach (var c in cols)
             {
                 var t = c.GetComponentInParent<Tree>();
@@ -50,7 +46,7 @@ public class PlayerController : MonoBehaviour
             }
         }
 
-        // 3) Al/Bırak (E)
+        // Al/Bırak (E)
         if (Input.GetKeyDown(KeyCode.E))
         {
             if (carried == null) TryPickup();
@@ -60,29 +56,28 @@ public class PlayerController : MonoBehaviour
 
     void FixedUpdate()
     {
-        // Kamera yönüne göre dünya ekseninde yön üret
-        Vector3 camForward = cam.transform.forward; camForward.y = 0f; camForward.Normalize();
-        Vector3 camRight = cam.transform.right;     camRight.y = 0f;   camRight.Normalize();
+        // 2) Fiziği burada uygula
+        // Hızlandırma / yavaşlatma (smooth)
+        Vector3 targetVel = inputDir * moveSpeed;
+        Vector3 curVel = rb.linearVelocity;
+        Vector3 newVel = new Vector3(
+            Mathf.SmoothDamp(curVel.x, targetVel.x, ref velRef.x, accelTime),
+            curVel.y,
+            Mathf.SmoothDamp(curVel.z, targetVel.z, ref velRef.z, accelTime)
+        );
 
-        Vector3 moveDir = (camForward * input.y + camRight * input.x);
-        float inputMag = Mathf.Clamp01(moveDir.magnitude);
-        moveDir = inputMag > 0.0001f ? moveDir.normalized : Vector3.zero;
+        rb.MovePosition(rb.position + newVel * Time.fixedDeltaTime);
 
-        // Hız yumuşatma
-        float targetSpeed = inputMag * moveSpeed;
-        currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedVel, accelTime);
-
-        // Dönüş yumuşatma (sadece hareket varken)
-        if (inputMag > 0.0001f)
+        // 3) Dönüşü yumuşat (sadece hareket varsa)
+        if (inputDir.sqrMagnitude > 0.0001f)
         {
-            float targetAngle = Mathf.Atan2(moveDir.x, moveDir.z) * Mathf.Rad2Deg;
-            float y = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref turnSmoothVel, turnSmoothTime);
-            transform.rotation = Quaternion.Euler(0f, y, 0f);
+            float targetAngle = Mathf.Atan2(inputDir.x, inputDir.z) * Mathf.Rad2Deg;
+            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref turnVelRef, turnSmoothTime);
+            rb.MoveRotation(Quaternion.Euler(0f, angle, 0f));
         }
 
-        // Fiziksel hareket
-        Vector3 delta = moveDir * currentSpeed * Time.fixedDeltaTime;
-        rb.MovePosition(rb.position + delta);
+        // 4) Çarpışmadan gelen açısal momenti söndür
+        rb.angularVelocity = Vector3.zero;
     }
 
     void TryPickup()
@@ -94,12 +89,14 @@ public class PlayerController : MonoBehaviour
             {
                 carried = c.gameObject;
                 var rb2 = carried.GetComponent<Rigidbody>();
-                if (rb2) { rb2.isKinematic = true; rb2.velocity = Vector3.zero; rb2.angularVelocity = Vector3.zero; }
-                carried.transform.SetParent(carryPoint, worldPositionStays:false);
+                if (rb2) rb2.isKinematic = true;
+
+                // Layer’ını LogCarried gibi çarpışmayan bir layer’a al
+                carried.layer = LayerMask.NameToLayer("IgnorePlayer");
+
+                carried.transform.SetParent(carryPoint);
                 carried.transform.localPosition = Vector3.zero;
                 carried.transform.localRotation = Quaternion.identity;
-
-                // İstenirse: Carried layer'ını Player ile çakıştırma (Project Settings > Physics’ten ayarla)
                 break;
             }
         }
@@ -109,22 +106,20 @@ public class PlayerController : MonoBehaviour
 
     public void ClearCarried()
     {
-        if (carried == null) return;
+        if (!carried) return;
         Destroy(carried);
         carried = null;
     }
 
     void Drop()
     {
-        if (carried == null) return;
-
+        if (!carried) return;
         var rb2 = carried.GetComponent<Rigidbody>();
         carried.transform.SetParent(null);
         if (rb2)
         {
+            carried.layer = LayerMask.NameToLayer("Log");
             rb2.isKinematic = false;
-            rb2.velocity = Vector3.zero;
-            rb2.angularVelocity = Vector3.zero;
             rb2.AddForce(transform.forward * 2f, ForceMode.VelocityChange);
         }
         carried = null;
